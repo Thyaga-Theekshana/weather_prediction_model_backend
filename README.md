@@ -22,19 +22,27 @@ This repository contains the backend model and prediction pipeline for the weath
 python -m pip install -r requirements.txt
 ```
 
-2. Train the model:
+2. Create your environment file:
+
+```bash
+copy .env.example .env
+```
+
+3. Update `.env` with your Firebase project settings and credentials path.
+
+4. Train the model:
 
 ```bash
 python train_lstm_model.py
 ```
 
-3. Run the prediction API:
+5. Run the prediction API:
 
 ```bash
 python prediction_api.py
 ```
 
-4. Run the live prediction service:
+6. Run the live prediction service:
 
 ```bash
 python live_prediction_service.py
@@ -44,4 +52,6 @@ python live_prediction_service.py
 
 - This repository is intentionally separate from the frontend project.
 - Model artifacts are stored in `models/` and are excluded from version control.
-- Firebase credentials and service account files should be provided via environment variables or secure configuration outside this repository.
+- Secrets and service account files must never be checked in.
+- Use `.env` and environment variables to keep credentials out of source control.
+- See `.env.example` for the required configuration keys.

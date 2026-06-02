@@ -13,12 +13,14 @@ import json
 from datetime import datetime, timedelta
 import os
 
+import config
+
 app = Flask(__name__)
 CORS(app)
 
 class PredictionService:
-    def __init__(self, model_dir='models'):
-        self.model_dir = model_dir
+    def __init__(self, model_dir=None):
+        self.model_dir = model_dir or config.MODEL_DIR
         self.model = None
         self.scaler_X = None
         self.scaler_y = None
@@ -238,27 +240,34 @@ def predict():
 @app.route('/predict-from-firebase', methods=['POST'])
 def predict_from_firebase():
     """
-    Fetch latest data from Firebase and make prediction
-    
-    Expected JSON payload:
+    Fetch latest data from Firebase and make prediction.
+
+    The service uses secure configuration from the environment or .env file.
+    Optional request payload fields:
     {
-        "firebase_url": "https://your-project.firebaseio.com",
-        "auth_token": "your_token"
+        "firebase_url": "https://your-project.firebaseio.com"
     }
     """
     try:
         import firebase_admin
         from firebase_admin import db
+        from firebase_admin import credentials
 
         data = request.get_json() or {}
-        firebase_url = data.get('firebase_url')
+        firebase_url = data.get('firebase_url') or config.FIREBASE_DATABASE_URL
         if not firebase_url:
-            return jsonify({'error': 'Missing "firebase_url" field'}), 400
+            return jsonify({'error': 'Missing "firebase_url" field and no FIREBASE_DATABASE_URL configured'}), 400
 
         if not firebase_admin._apps:
-            firebase_admin.initialize_app(options={
-                'databaseURL': firebase_url
-            })
+            if config.FIREBASE_CREDENTIALS and os.path.exists(config.FIREBASE_CREDENTIALS):
+                cred = credentials.Certificate(config.FIREBASE_CREDENTIALS)
+                firebase_admin.initialize_app(cred, {
+                    'databaseURL': firebase_url
+                })
+            else:
+                firebase_admin.initialize_app(options={
+                    'databaseURL': firebase_url
+                })
 
         ref = db.reference('/weather_data')
         cutoff_time = int((datetime.now() - timedelta(hours=24)).timestamp())

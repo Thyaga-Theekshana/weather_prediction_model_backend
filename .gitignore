@@ -8,9 +8,21 @@ env/
 venv/
 .venv/
 
-# Model and log outputs
+# Environment and secret configuration
+.env
+.env.*
+firebase_credentials.json
+serviceAccount*.json
+*.key.json
+
+# Runtime data and outputs
 models/
 logs/
+data/
+
+# IDE files
+.vscode/
+.idea/
 
 # OS files
 .DS_Store

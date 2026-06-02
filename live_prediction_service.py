@@ -17,6 +17,8 @@ from flask_cors import CORS
 import threading
 import time
 
+import config
+
 app = Flask(__name__)
 CORS(app)
 
@@ -245,13 +247,18 @@ service = None
 def init_service():
     """Initialize the prediction service"""
     global service
-    
-    firebase_url = os.getenv('FIREBASE_URL', 'https://YOUR_PROJECT_ID.firebaseio.com')
-    credentials_path = os.getenv('FIREBASE_CREDENTIALS', 'firebase_credentials.json')
-    
+
+    firebase_url = config.FIREBASE_DATABASE_URL
+    credentials_path = config.FIREBASE_CREDENTIALS
+
+    if not firebase_url or not credentials_path:
+        raise ValueError(
+            'Missing Firebase configuration. Use .env or environment variables to set FIREBASE_DATABASE_URL and FIREBASE_CREDENTIALS.'
+        )
+
     if not os.path.exists(credentials_path):
         raise ValueError(f"Firebase credentials not found at {credentials_path}")
-    
+
     service = LivePredictionService(firebase_url, credentials_path)
     print("✓ Live prediction service initialized")
 

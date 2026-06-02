@@ -10,13 +10,27 @@ import json
 from datetime import datetime
 import os
 
+import config
+
 # Initialize Firebase Admin SDK
-def init_firebase(credentials_path):
-    """Initialize Firebase with service account credentials"""
-    cred = credentials.Certificate(credentials_path)
-    firebase_admin.initialize_app(cred, {
-        'databaseURL': 'https://YOUR_PROJECT_ID.firebaseio.com'
-    })
+def init_firebase(credentials_path=None, database_url=None):
+    """Initialize Firebase with service account credentials."""
+    credentials_path = credentials_path or config.FIREBASE_CREDENTIALS
+    database_url = database_url or config.FIREBASE_DATABASE_URL
+
+    if not database_url:
+        raise ValueError('FIREBASE_DATABASE_URL is required. Set it in .env or your environment.')
+
+    if credentials_path and os.path.exists(credentials_path):
+        cred = credentials.Certificate(credentials_path)
+        firebase_admin.initialize_app(cred, {
+            'databaseURL': database_url
+        })
+    else:
+        firebase_admin.initialize_app(options={
+            'databaseURL': database_url
+        })
+
     print("✓ Firebase initialized")
 
 def fetch_all_data():
@@ -146,20 +160,21 @@ def export_to_csv(df, output_dir='data'):
 def main():
     """Main execution"""
     print("=== Firebase Data Export ===\n")
-    
-    # Update this path to your Firebase service account key
-    credentials_path = 'firebase_credentials.json'
-    
+
+    credentials_path = config.FIREBASE_CREDENTIALS
+    database_url = config.FIREBASE_DATABASE_URL
+
+    if not credentials_path or not database_url:
+        print("ERROR: Missing Firebase configuration.")
+        print("Copy .env.example to .env and set FIREBASE_DATABASE_URL and FIREBASE_CREDENTIALS.")
+        return
+
     if not os.path.exists(credentials_path):
         print(f"ERROR: Firebase credentials not found at {credentials_path}")
-        print("\nTo get credentials:")
-        print("1. Go to Firebase Console → Project Settings")
-        print("2. Service Accounts → Generate New Private Key")
-        print("3. Save as 'firebase_credentials.json'")
         return
-    
+
     # Initialize Firebase
-    init_firebase(credentials_path)
+    init_firebase(credentials_path, database_url)
     
     # Fetch data
     data = fetch_all_data()
