@@ -1,0 +1,17 @@
+# Python artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+
+# Model and log outputs
+models/
+logs/
+
+# OS files
+.DS_Store
+Thumbs.db
