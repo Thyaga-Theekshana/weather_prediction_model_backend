@@ -309,14 +309,14 @@ class WeatherLSTMPredictor:
                 all_preds.append(outputs.cpu().numpy())
                 all_targets.append(y_batch.numpy())
         
-        predictions = np.vstack(all_preds)
-        targets = np.vstack(all_targets)
+        predictions_scaled = np.vstack(all_preds)
+        targets_scaled = np.vstack(all_targets)
         
-        # Inverse transform
-        predictions = self.scaler_y.inverse_transform(predictions)
-        targets = self.scaler_y.inverse_transform(targets)
+        # Inverse transform back to original target scale
+        predictions = self.scaler_y.inverse_transform(predictions_scaled)
+        targets = self.scaler_y.inverse_transform(targets_scaled)
         
-        # Calculate metrics for each parameter
+        # Calculate metrics on original-scale predictions and targets
         for i, param in enumerate(self.target_params):
             rmse = np.sqrt(mean_squared_error(targets[:, i], predictions[:, i]))
             mae = mean_absolute_error(targets[:, i], predictions[:, i])
