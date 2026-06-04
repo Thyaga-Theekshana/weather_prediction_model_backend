@@ -88,6 +88,20 @@ class WeatherLSTMPredictor:
         """Load and preprocess data"""
         print(f"Loading data from {csv_path}...")
         df = pd.read_csv(csv_path)
+        df.columns = df.columns.str.lower()
+        df = df.rename(columns={
+            'voc_index': 'voc',
+            'pm2_5': 'pm2_5',
+            'co2': 'co2',
+            'light_intensity': 'light_intensity',
+            'wind_speed': 'wind_speed',
+            'wind_direction': 'wind_direction',
+            'humidity': 'humidity',
+            'temperature': 'temperature',
+            'pressure': 'pressure',
+            'rainfall': 'rainfall'
+        })
+
         df['datetime'] = pd.to_datetime(df['datetime'])
         df = df.sort_values('datetime').reset_index(drop=True)
         
@@ -116,6 +130,15 @@ class WeatherLSTMPredictor:
         
         # Target columns
         target_cols = [col for col in self.target_params if col in df.columns]
+        
+        if len(feature_cols) == 0:
+            raise ValueError(
+                'No feature columns found in the CSV. Check your header mapping and feature column names.'
+            )
+        if len(target_cols) == 0:
+            raise ValueError(
+                'No target columns found in the CSV. Check your target parameter names.'
+            )
         
         X_list = []
         y_list = []
@@ -189,7 +212,7 @@ class WeatherLSTMPredictor:
         criterion = nn.MSELoss()
         optimizer = torch.optim.Adam(self.model.parameters(), lr=learning_rate)
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode='min', factor=0.5, patience=5, verbose=True
+            optimizer, mode='min', factor=0.5, patience=5
         )
         
         # Training loop
