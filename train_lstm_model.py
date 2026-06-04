@@ -92,7 +92,8 @@ class WeatherLSTMPredictor:
         df = df.sort_values('datetime').reset_index(drop=True)
         
         # Resample to 1-minute intervals
-        df = df.set_index('datetime').resample('1min').mean().interpolate()
+        df = df.set_index('datetime')
+        df = df.resample('1min').mean(numeric_only=True).interpolate()
         df = df.reset_index()
         
         print(f"✓ Loaded {len(df)} records")
