@@ -60,6 +60,7 @@ class WeatherLSTM(nn.Module):
         # Apply attention
         attention_weights = torch.softmax(self.attention(lstm_out), dim=1)
         context = torch.sum(attention_weights * lstm_out, dim=1)
+        context = self.dropout(context)
         
         # Fully connected layers
         out = self.relu(self.fc1(context))
@@ -172,31 +173,42 @@ class WeatherLSTMPredictor:
         df = self.load_data(csv_path)
         X, y = self.create_sequences(df)
         
-        # Split data (80% train, 20% test)
-        split_idx = int(len(X) * 0.8)
-        X_train, X_test = X[:split_idx], X[split_idx:]
-        y_train, y_test = y[:split_idx], y[split_idx:]
+        # Split data (80% train, 10% validation, 10% test)
+        n_total = len(X)
+        train_end = int(n_total * 0.8)
+        val_end = train_end + int(n_total * 0.1)
+        if val_end >= n_total:
+            val_end = n_total - 1
+        
+        X_train, X_val, X_test = X[:train_end], X[train_end:val_end], X[val_end:]
+        y_train, y_val, y_test = y[:train_end], y[train_end:val_end], y[val_end:]
         
         # Normalize features
         n_samples, n_timesteps, n_features = X_train.shape
         X_train_reshaped = X_train.reshape(-1, n_features)
+        X_val_reshaped = X_val.reshape(-1, n_features)
         X_test_reshaped = X_test.reshape(-1, n_features)
         
         X_train_scaled = self.scaler_X.fit_transform(X_train_reshaped)
+        X_val_scaled = self.scaler_X.transform(X_val_reshaped)
         X_test_scaled = self.scaler_X.transform(X_test_reshaped)
         
         X_train_scaled = X_train_scaled.reshape(n_samples, n_timesteps, n_features)
+        X_val_scaled = X_val_scaled.reshape(len(X_val), n_timesteps, n_features)
         X_test_scaled = X_test_scaled.reshape(len(X_test), n_timesteps, n_features)
         
         # Normalize targets
         y_train_scaled = self.scaler_y.fit_transform(y_train)
+        y_val_scaled = self.scaler_y.transform(y_val)
         y_test_scaled = self.scaler_y.transform(y_test)
         
         # Create datasets
         train_dataset = WeatherDataset(X_train_scaled, y_train_scaled)
+        val_dataset = WeatherDataset(X_val_scaled, y_val_scaled)
         test_dataset = WeatherDataset(X_test_scaled, y_test_scaled)
         
         train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+        val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
         test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
         
         # Initialize model
@@ -217,8 +229,11 @@ class WeatherLSTMPredictor:
         
         # Training loop
         train_losses = []
-        test_losses = []
-        best_test_loss = float('inf')
+        val_losses = []
+        best_val_loss = float('inf')
+        epochs_no_improve = 0
+        patience = 5
+        best_model_path = 'best_lstm_model.pth'
         
         print("\nTraining...")
         for epoch in range(epochs):
@@ -240,38 +255,46 @@ class WeatherLSTMPredictor:
             train_loss /= len(train_loader)
             train_losses.append(train_loss)
             
-            # Evaluate
+            # Validate
             self.model.eval()
-            test_loss = 0
+            val_loss = 0
             with torch.no_grad():
-                for X_batch, y_batch in test_loader:
+                for X_batch, y_batch in val_loader:
                     X_batch = X_batch.to(self.device)
                     y_batch = y_batch.to(self.device)
                     outputs = self.model(X_batch)
                     loss = criterion(outputs, y_batch)
-                    test_loss += loss.item()
+                    val_loss += loss.item()
             
-            test_loss /= len(test_loader)
-            test_losses.append(test_loss)
+            val_loss /= len(val_loader)
+            val_losses.append(val_loss)
             
-            scheduler.step(test_loss)
+            scheduler.step(val_loss)
             
             if (epoch + 1) % 10 == 0:
-                print(f"Epoch [{epoch+1}/{epochs}] - Train Loss: {train_loss:.6f}, Test Loss: {test_loss:.6f}")
+                print(f"Epoch [{epoch+1}/{epochs}] - Train Loss: {train_loss:.6f}, Val Loss: {val_loss:.6f}")
             
-            # Save best model
-            if test_loss < best_test_loss:
-                best_test_loss = test_loss
+            # Save best model and early stop on validation loss
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
                 best_model_state = self.model.state_dict()
+                torch.save(best_model_state, best_model_path)
+                epochs_no_improve = 0
+                print(f"  Best model saved to {best_model_path} (Val Loss: {val_loss:.6f})")
+            else:
+                epochs_no_improve += 1
+                if epochs_no_improve >= patience:
+                    print(f"Early stopping at epoch {epoch+1} after {epochs_no_improve} epochs with no improvement.")
+                    break
         
         # Load best model
         self.model.load_state_dict(best_model_state)
         
-        # Final evaluation
+        # Final evaluation on test set
         print("\n=== Final Evaluation ===")
         self.evaluate(test_loader)
         
-        return train_losses, test_losses
+        return train_losses, val_losses
     
     def evaluate(self, test_loader):
         """Evaluate model performance"""
