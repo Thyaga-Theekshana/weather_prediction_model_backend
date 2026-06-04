@@ -70,7 +70,7 @@ class WeatherLSTM(nn.Module):
         return out
 
 class WeatherLSTMPredictor:
-    def __init__(self, lookback_hours=24, forecast_horizon=48):
+    def __init__(self, lookback_hours=1, forecast_horizon=48):
         self.lookback_hours = lookback_hours
         self.forecast_horizon = forecast_horizon
         self.model = None
@@ -362,7 +362,7 @@ def main():
     csv_path = 'data/weather_data_latest.csv'
     
     predictor = WeatherLSTMPredictor(
-        lookback_hours=24,
+        lookback_hours=1,
         forecast_horizon=48
     )
     
@@ -370,7 +370,7 @@ def main():
         csv_path,
         epochs=100,
         batch_size=32,
-        learning_rate=0.001
+        learning_rate=0.0005
     )
     
     predictor.save_model()
