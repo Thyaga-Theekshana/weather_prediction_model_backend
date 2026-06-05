@@ -15,7 +15,6 @@ from train_lstm_model import WeatherLSTM
 
 router = APIRouter(prefix="/predict", tags=["predictions"])
 app = FastAPI(title="Weather & Air Quality Prediction API")
-app.include_router(router)
 
 BASE_DIR = Path(__file__).resolve().parent
 MODEL_DIR = BASE_DIR / 'models'
@@ -275,3 +274,5 @@ async def health_check() -> Dict[str, Any]:
             'air_quality': None if air_quality_service is not None else load_aq_error
         }
     }
+
+app.include_router(router)
