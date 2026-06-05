@@ -179,30 +179,51 @@ class AirQualityXGBoostPredictor:
         return self.models
     
     def save_models(self, output_dir='models'):
-        """Save trained models"""
+        """Save trained models and scalers using joblib."""
         os.makedirs(output_dir, exist_ok=True)
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        
-        for param, model in self.models.items():
-            model_path = f'{output_dir}/xgboost_aq_{param}_{timestamp}.json'
-            model.save_model(model_path)
-            
-            scaler_path = f'{output_dir}/scaler_aq_{param}_{timestamp}.pkl'
-            joblib.dump(self.scalers[param], scaler_path)
-        
+
+        models_path = os.path.join(output_dir, f'xgboost_aq_models_{timestamp}.pkl')
+        scalers_path = os.path.join(output_dir, f'scalers_aq_{timestamp}.pkl')
+
+        joblib.dump(self.models, models_path)
+        joblib.dump(self.scalers, scalers_path)
+
         # Save metadata
         metadata = {
             'lookback_hours': self.lookback_hours,
             'forecast_horizon': self.forecast_horizon,
             'feature_columns': self.feature_columns,
             'target_params': self.target_params,
+            'models_path': models_path,
+            'scalers_path': scalers_path,
             'timestamp': timestamp
         }
-        
-        with open(f'{output_dir}/metadata_aq_{timestamp}.json', 'w') as f:
+
+        metadata_path = os.path.join(output_dir, f'metadata_aq_{timestamp}.json')
+        with open(metadata_path, 'w') as f:
             json.dump(metadata, f, indent=2)
-        
+
         print(f"\n✓ Models saved to {output_dir}/")
+        print(f"  model file:   {models_path}")
+        print(f"  scalers file: {scalers_path}")
+        print(f"  metadata file: {metadata_path}")
+
+    def load_models(self, models_path, scalers_path=None):
+        """Load trained models and scalers from disk."""
+        if not os.path.exists(models_path):
+            raise FileNotFoundError(f'Models file not found: {models_path}')
+
+        self.models = joblib.load(models_path)
+
+        if scalers_path:
+            if not os.path.exists(scalers_path):
+                raise FileNotFoundError(f'Scalers file not found: {scalers_path}')
+            self.scalers = joblib.load(scalers_path)
+
+        print(f"✓ Loaded models from {models_path}")
+        if scalers_path:
+            print(f"✓ Loaded scalers from {scalers_path}")
 
 def main():
     csv_path = 'data/weather_data_latest.csv'
