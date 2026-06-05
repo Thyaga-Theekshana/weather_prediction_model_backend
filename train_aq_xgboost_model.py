@@ -225,6 +225,45 @@ class AirQualityXGBoostPredictor:
         if scalers_path:
             print(f"✓ Loaded scalers from {scalers_path}")
 
+    def _find_latest_metadata_file(self, output_dir='models'):
+        if not os.path.isdir(output_dir):
+            raise FileNotFoundError(f'Model directory not found: {output_dir}')
+
+        metadata_files = [
+            os.path.join(output_dir, f)
+            for f in os.listdir(output_dir)
+            if f.startswith('metadata_aq_') and f.endswith('.json')
+        ]
+
+        if not metadata_files:
+            raise FileNotFoundError(
+                f'No metadata files found in {output_dir}. Run save_models() first.'
+            )
+
+        latest_metadata = max(metadata_files, key=os.path.getmtime)
+        return latest_metadata
+
+    def load_latest_models(self, output_dir='models'):
+        """Load the latest saved models and scalers from a directory."""
+        metadata_path = self._find_latest_metadata_file(output_dir)
+        with open(metadata_path, 'r') as f:
+            metadata = json.load(f)
+
+        models_path = metadata.get('models_path')
+        scalers_path = metadata.get('scalers_path')
+
+        if not models_path:
+            raise ValueError(f'No models_path found in metadata file: {metadata_path}')
+
+        self.load_models(models_path, scalers_path)
+        self.lookback_hours = metadata.get('lookback_hours', self.lookback_hours)
+        self.forecast_horizon = metadata.get('forecast_horizon', self.forecast_horizon)
+        self.feature_columns = metadata.get('feature_columns', self.feature_columns)
+        self.target_params = metadata.get('target_params', self.target_params)
+
+        print(f"✓ Loaded latest model set from metadata: {metadata_path}")
+
+
 def main():
     csv_path = 'data/weather_data_latest.csv'
     if not os.path.exists(csv_path):
