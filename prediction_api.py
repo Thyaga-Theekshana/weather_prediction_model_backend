@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 import torch
 from fastapi import APIRouter, FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from train_aq_xgboost_model import AirQualityXGBoostPredictor
@@ -15,6 +16,13 @@ from train_lstm_model import WeatherLSTM
 
 router = APIRouter(prefix="/predict", tags=["predictions"])
 app = FastAPI(title="Weather & Air Quality Prediction API")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 BASE_DIR = Path(__file__).resolve().parent
 MODEL_DIR = BASE_DIR / 'models'
