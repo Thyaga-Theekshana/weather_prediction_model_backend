@@ -25,12 +25,19 @@ class PredictionService:
         self.scaler_X = None
         self.scaler_y = None
         self.metadata = None
+        
+        self.model_aq = None
+        self.scaler_aq_X = None
+        self.scaler_aq_y = None
+        self.metadata_aq = None
+        
         self.model_type = 'lstm'  # or 'xgboost'
         
         self.load_latest_model()
     
     def load_latest_model(self):
-        """Load the most recent trained model"""
+        """Load the most recent trained weather and air quality models"""
+        # Load weather model
         try:
             # Find latest LSTM model
             lstm_files = [f for f in os.listdir(self.model_dir) if f.startswith('lstm_weather_')]
@@ -64,13 +71,46 @@ class PredictionService:
                 self.model.load_state_dict(torch.load(model_path, map_location=device))
                 self.model.eval()
                 
-                self.model_type = 'lstm'
-                print(f"✓ Loaded LSTM model from {timestamp}")
-                return True
-        
+                print(f"✓ Loaded Weather LSTM model from {timestamp}")
         except Exception as e:
-            print(f"Error loading model: {e}")
-            return False
+            print(f"Error loading Weather model: {e}")
+
+        # Load air quality model
+        try:
+            lstm_aq_files = [f for f in os.listdir(self.model_dir) if f.startswith('lstm_air_quality_')]
+            if lstm_aq_files:
+                latest_lstm_aq = sorted(lstm_aq_files)[-1]
+                timestamp_aq = latest_lstm_aq.split('_')[-1].replace('.pth', '')
+                
+                model_aq_path = f'{self.model_dir}/{latest_lstm_aq}'
+                scaler_aq_X_path = f'{self.model_dir}/scaler_aq_X_{timestamp_aq}.pkl'
+                scaler_aq_y_path = f'{self.model_dir}/scaler_aq_y_{timestamp_aq}.pkl'
+                metadata_aq_path = f'{self.model_dir}/lstm_aq_metadata_{timestamp_aq}.json'
+                
+                # Load metadata
+                with open(metadata_aq_path, 'r') as f:
+                    self.metadata_aq = json.load(f)
+                
+                # Load scalers
+                self.scaler_aq_X = joblib.load(scaler_aq_X_path)
+                self.scaler_aq_y = joblib.load(scaler_aq_y_path)
+                
+                # Load LSTM model
+                from train_aq_lstm_model import AirQualityLSTM
+                device = torch.device('cpu')
+                self.model_aq = AirQualityLSTM(
+                    input_size=self.metadata_aq['input_size'],
+                    hidden_size=128,
+                    num_layers=2,
+                    output_size=self.metadata_aq['output_size']
+                ).to(device)
+                
+                self.model_aq.load_state_dict(torch.load(model_aq_path, map_location=device))
+                self.model_aq.eval()
+                
+                print(f"✓ Loaded Air Quality LSTM model from {timestamp_aq}")
+        except Exception as e:
+            print(f"Error loading Air Quality model: {e}")
     
     def _ensure_datetime(self, df):
         if 'datetime' not in df.columns:
@@ -118,49 +158,114 @@ class PredictionService:
             recent_data: DataFrame with last 24 hours of sensor readings
         
         Returns:
-            Dictionary with predictions for each parameter
+            Dictionary with predictions for each parameter (weather and air quality)
         """
-        if self.model is None:
+        if self.model is None and self.model_aq is None:
             raise ValueError("No model loaded")
         
-        try:
-            # Prepare features
-            feature_cols = self.metadata['feature_columns']
-            X_seq = recent_data[feature_cols].values
-            
-            # Ensure correct sequence length
-            expected_length = self.metadata['lookback_hours'] * 60
-            if len(X_seq) < expected_length:
-                # Pad with last value if needed
-                padding = np.repeat(X_seq[-1:], expected_length - len(X_seq), axis=0)
-                X_seq = np.vstack([padding, X_seq])
-            elif len(X_seq) > expected_length:
-                X_seq = X_seq[-expected_length:]
-            
-            # Normalize
-            X_scaled = self.scaler_X.transform(X_seq)
-            X_scaled = X_scaled.reshape(1, expected_length, len(feature_cols))
-            
-            # Predict
-            with torch.no_grad():
-                X_tensor = torch.FloatTensor(X_scaled)
-                predictions = self.model(X_tensor).numpy()
-            
-            # Inverse transform
-            predictions = self.scaler_y.inverse_transform(predictions)
-            
-            # Format results
-            result = {}
-            for i, param in enumerate(self.metadata['target_params']):
-                result[param] = float(predictions[0, i])
-            
-            result['forecast_time'] = datetime.now().isoformat()
-            result['forecast_horizon_hours'] = self.metadata['forecast_horizon']
-            
-            return result
+        # Standardize columns
+        df = recent_data.copy()
+        df.columns = df.columns.str.lower()
+        df = df.rename(columns={
+            'voc_index': 'voc',
+            'nox_index': 'nox',
+            'pm2_5': 'pm2_5',
+            'pm1_0': 'pm1_0',
+            'pm10': 'pm10',
+            'co2': 'co2',
+            'co': 'co',
+            'light_intensity': 'light_intensity',
+            'wind_speed': 'wind_speed',
+            'wind_direction': 'wind_direction',
+            'humidity': 'humidity',
+            'temperature': 'temperature',
+            'pressure': 'pressure',
+            'rainfall': 'rainfall'
+        })
         
-        except Exception as e:
-            raise ValueError(f"Prediction error: {str(e)}")
+        df = self._add_time_features(df)
+        result = {}
+        
+        # Weather Predictions
+        if self.model is not None:
+            try:
+                feature_cols = self.metadata['feature_columns']
+                # Make sure all features exist
+                for col in feature_cols:
+                    if col not in df.columns:
+                        df[col] = 0.0
+                        
+                X_seq = df[feature_cols].values
+                
+                # Ensure correct sequence length
+                expected_length = self.metadata['lookback_hours'] * 60
+                if len(X_seq) < expected_length:
+                    # Pad with last value if needed
+                    padding = np.repeat(X_seq[-1:], expected_length - len(X_seq), axis=0)
+                    X_seq = np.vstack([padding, X_seq])
+                elif len(X_seq) > expected_length:
+                    X_seq = X_seq[-expected_length:]
+                
+                # Normalize
+                X_scaled = self.scaler_X.transform(X_seq)
+                X_scaled = X_scaled.reshape(1, expected_length, len(feature_cols))
+                
+                # Predict
+                with torch.no_grad():
+                    X_tensor = torch.FloatTensor(X_scaled)
+                    predictions = self.model(X_tensor).numpy()
+                
+                # Inverse transform
+                predictions = self.scaler_y.inverse_transform(predictions)
+                
+                # Format weather results
+                for i, param in enumerate(self.metadata['target_params']):
+                    result[param] = float(predictions[0, i])
+            except Exception as e:
+                print(f"Weather prediction error: {e}")
+        
+        # Air Quality Predictions
+        if self.model_aq is not None:
+            try:
+                feature_cols_aq = self.metadata_aq['feature_columns']
+                # Make sure all features exist
+                for col in feature_cols_aq:
+                    if col not in df.columns:
+                        df[col] = 0.0
+                        
+                X_seq_aq = df[feature_cols_aq].values
+                
+                # Ensure correct sequence length
+                expected_length_aq = self.metadata_aq['lookback_hours'] * 60
+                if len(X_seq_aq) < expected_length_aq:
+                    # Pad with last value if needed
+                    padding = np.repeat(X_seq_aq[-1:], expected_length_aq - len(X_seq_aq), axis=0)
+                    X_seq_aq = np.vstack([padding, X_seq_aq])
+                elif len(X_seq_aq) > expected_length_aq:
+                    X_seq_aq = X_seq_aq[-expected_length_aq:]
+                
+                # Normalize
+                X_scaled_aq = self.scaler_aq_X.transform(X_seq_aq)
+                X_scaled_aq = X_scaled_aq.reshape(1, expected_length_aq, len(feature_cols_aq))
+                
+                # Predict
+                with torch.no_grad():
+                    X_tensor_aq = torch.FloatTensor(X_scaled_aq)
+                    predictions_aq = self.model_aq(X_tensor_aq).numpy()
+                
+                # Inverse transform
+                predictions_aq = self.scaler_aq_y.inverse_transform(predictions_aq)
+                
+                # Format air quality results
+                for i, param in enumerate(self.metadata_aq['target_params']):
+                    result[param] = float(predictions_aq[0, i])
+            except Exception as e:
+                print(f"Air quality prediction error: {e}")
+        
+        result['forecast_time'] = datetime.now().isoformat()
+        result['forecast_horizon_hours'] = self.metadata['forecast_horizon'] if self.metadata else (self.metadata_aq['forecast_horizon'] if self.metadata_aq else 48)
+        
+        return result
 
 # Initialize service
 prediction_service = PredictionService()
@@ -169,13 +274,14 @@ prediction_service = PredictionService()
 def home():
     """API home page"""
     return jsonify({
-        'service': 'Weather Prediction API',
+        'service': 'Weather & Air Quality Prediction API',
         'version': '1.0',
-        'model_type': prediction_service.model_type,
+        'weather_model_loaded': prediction_service.model is not None,
+        'air_quality_model_loaded': prediction_service.model_aq is not None,
         'endpoints': {
-            '/predict': 'POST - Make weather prediction',
+            '/predict': 'POST - Make weather & air quality prediction',
             '/health': 'GET - Check API health',
-            '/model-info': 'GET - Get model information'
+            '/model-info': 'GET - Get models information'
         }
     })
 
@@ -184,19 +290,20 @@ def health():
     """Health check endpoint"""
     return jsonify({
         'status': 'healthy',
-        'model_loaded': prediction_service.model is not None,
+        'weather_model_loaded': prediction_service.model is not None,
+        'air_quality_model_loaded': prediction_service.model_aq is not None,
         'timestamp': datetime.now().isoformat()
     })
 
 @app.route('/model-info', methods=['GET'])
 def model_info():
-    """Get model information"""
-    if prediction_service.metadata is None:
+    """Get models information"""
+    if prediction_service.metadata is None and prediction_service.metadata_aq is None:
         return jsonify({'error': 'No model loaded'}), 500
     
     return jsonify({
-        'model_type': prediction_service.model_type,
-        'metadata': prediction_service.metadata
+        'weather_metadata': prediction_service.metadata,
+        'air_quality_metadata': prediction_service.metadata_aq
     })
 
 @app.route('/predict', methods=['POST'])
