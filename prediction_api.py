@@ -33,11 +33,11 @@ class PredictionRequest(BaseModel):
 
 
 class WeatherPredictionPayload(BaseModel):
-    temperature: float = Field(..., alias='temp')
+    temperature: float = Field(..., validation_alias='temp')
     humidity: float
     pressure: float
     aqi: float
-    pm2_5: float = Field(..., alias='pm25')
+    pm2_5: float = Field(..., validation_alias='pm25')
     light: float
     datetime: Optional[datetime] = None
     timestamp: Optional[float] = None
