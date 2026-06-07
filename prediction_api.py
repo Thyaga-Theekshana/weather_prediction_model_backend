@@ -1,4 +1,5 @@
-from typing import Any, Dict, List
+from datetime import datetime
+from typing import Any, Dict, List, Optional
 import json
 import os
 from pathlib import Path
@@ -7,7 +8,7 @@ import numpy as np
 import pandas as pd
 from fastapi import APIRouter, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from tensorflow.keras.models import load_model
 
 from train_aq_xgboost_model import AirQualityXGBoostPredictor
@@ -29,6 +30,20 @@ BEST_LSTM_MODEL = BASE_DIR / 'best_lstm_model.pth'
 
 class PredictionRequest(BaseModel):
     records: List[Dict[str, Any]]
+
+
+class WeatherPredictionPayload(BaseModel):
+    temperature: float = Field(..., alias='temp')
+    humidity: float
+    pressure: float
+    aqi: float
+    pm2_5: float = Field(..., alias='pm25')
+    light: float
+    datetime: Optional[datetime] = None
+    timestamp: Optional[float] = None
+
+    class Config:
+        allow_population_by_field_name = True
 
 
 class WeatherPredictionService:
@@ -224,11 +239,12 @@ except Exception as exc:
 
 
 @router.post('/weather')
-async def predict_weather(request: PredictionRequest) -> Dict[str, Any]:
+async def predict_weather(payload: WeatherPredictionPayload) -> Dict[str, Any]:
     if weather_service is None:
         raise HTTPException(status_code=503, detail=f'Weather model unavailable: {load_weather_error}')
 
-    response = weather_service.predict(request.records)
+    record = payload.dict(by_alias=False, exclude_none=True)
+    response = weather_service.predict([record])
     return response
 
 
