@@ -44,6 +44,7 @@ class WeatherPredictionPayload(BaseModel):
 
     model_config = {
         'populate_by_name': True,
+        'extra': 'ignore',
     }
 
 
@@ -95,7 +96,7 @@ class WeatherPredictionService:
         elif 'timestamp' in df.columns:
             df['datetime'] = pd.to_datetime(df['timestamp'], unit='s', errors='coerce')
         else:
-            df['datetime'] = pd.RangeIndex(start=0, stop=len(df))
+            df['datetime'] = pd.date_range(end=pd.Timestamp.now(), periods=len(df), freq='H')
 
         if df['datetime'].isna().any():
             raise HTTPException(status_code=400, detail='datetime values must be parseable')
@@ -115,15 +116,19 @@ class WeatherPredictionService:
 
         X_seq = df[self.FEATURE_ORDER].values
         if len(X_seq) < self.LOOKBACK_STEPS:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f'Weather prediction requires at least {self.LOOKBACK_STEPS} rows, '
-                    f'but received {len(X_seq)}'
-                )
-            )
+            pad_count = self.LOOKBACK_STEPS - len(X_seq)
+            pad_rows = np.repeat(X_seq[[0]], pad_count, axis=0)
+            X_seq = np.vstack([pad_rows, X_seq])
 
         X_seq = X_seq[-self.LOOKBACK_STEPS:]
+        predictions = self._predict_sequence(X_seq)
+
+        return {
+            'model_type': 'weather',
+            'predictions': predictions
+        }
+
+    def _predict_sequence(self, X_seq: np.ndarray) -> Dict[str, float]:
         X_scaled = (X_seq - self.scaler_X_mean) / self.scaler_X_scale
         X_scaled = X_scaled.reshape(1, self.LOOKBACK_STEPS, len(self.FEATURE_ORDER))
 
@@ -131,12 +136,55 @@ class WeatherPredictionService:
         predictions = predictions_scaled[0] * self.scaler_y_scale + self.scaler_y_mean
 
         return {
-            'model_type': 'weather',
-            'predictions': {
-                feature: float(predictions[idx])
-                for idx, feature in enumerate(self.FEATURE_ORDER)
-            }
+            feature: float(predictions[idx])
+            for idx, feature in enumerate(self.FEATURE_ORDER)
         }
+
+    def forecast(self, records: List[Dict[str, Any]], hours: int = 24) -> List[Dict[str, Any]]:
+        df = self._prepare_dataframe(records)
+
+        for feature in self.FEATURE_ORDER:
+            if feature not in df.columns:
+                raise HTTPException(status_code=400, detail=f'Missing required feature: {feature}')
+
+        X_seq = df[self.FEATURE_ORDER].values
+        if len(X_seq) < self.LOOKBACK_STEPS:
+            pad_count = self.LOOKBACK_STEPS - len(X_seq)
+            pad_rows = np.repeat(X_seq[[0]], pad_count, axis=0)
+            X_seq = np.vstack([pad_rows, X_seq])
+
+        X_seq = X_seq[-self.LOOKBACK_STEPS:].astype(float)
+        last_datetime = df['datetime'].iloc[-1]
+
+        forecast_points: List[Dict[str, Any]] = []
+        for step in range(1, hours + 1):
+            predicted_values = self._predict_sequence(X_seq)
+            forecast_point = {
+                'datetime': (last_datetime + pd.Timedelta(hours=step)).isoformat(),
+                **predicted_values
+            }
+            forecast_points.append(forecast_point)
+
+            X_seq = np.vstack([
+                X_seq[1:],
+                np.array([predicted_values[feature] for feature in self.FEATURE_ORDER], dtype=float)
+            ])
+
+        return forecast_points
+
+
+def aqi_to_label(aqi: float) -> str:
+    if aqi <= 50:
+        return 'Good'
+    if aqi <= 100:
+        return 'Moderate'
+    if aqi <= 150:
+        return 'Unhealthy for Sensitive Groups'
+    if aqi <= 200:
+        return 'Unhealthy'
+    if aqi <= 300:
+        return 'Very Unhealthy'
+    return 'Hazardous'
 
 
 class AirQualityPredictionService:
@@ -241,12 +289,37 @@ except Exception as exc:
 
 @router.post('/weather')
 async def predict_weather(payload: WeatherPredictionPayload) -> Dict[str, Any]:
+    print('--- RECEIVED PAYLOAD FROM FRONTEND ---', payload)
     if weather_service is None:
         raise HTTPException(status_code=503, detail=f'Weather model unavailable: {load_weather_error}')
 
-    record = payload.dict(by_alias=False, exclude_none=True)
-    response = weather_service.predict([record])
-    return response
+    record = payload.model_dump(by_alias=False, exclude_none=True)
+    try:
+        predictions = weather_service.predict([record])
+    except Exception as e:
+        print('LOGGED ERROR:', str(e))
+        raise HTTPException(status_code=400, detail=str(e))
+
+    forecast = weather_service.forecast([record], hours=24)
+    return {
+        'model_type': predictions.get('model_type', 'weather'),
+        'temperature': predictions['predictions']['temperature'],
+        'humidity': predictions['predictions']['humidity'],
+        'pressure': predictions['predictions']['pressure'],
+        'aqi': predictions['predictions']['aqi'],
+        'pm25': predictions['predictions']['pm2_5'],
+        'light': predictions['predictions']['light'],
+        'predicted_temperature': predictions['predictions']['temperature'],
+        'predicted_aqi': predictions['predictions']['aqi'],
+        'predicted_pm25': predictions['predictions']['pm2_5'],
+        'predicted_air_quality': aqi_to_label(predictions['predictions']['aqi']),
+        'forecast_horizon_hours': 24,
+        'hourly_forecast': forecast,
+        'forecast_series': {
+            feature: [point[feature] for point in forecast]
+            for feature in weather_service.FEATURE_ORDER
+        },
+    }
 
 
 @router.post('/air-quality')
