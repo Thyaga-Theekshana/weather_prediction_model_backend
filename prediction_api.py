@@ -15,9 +15,11 @@ from train_aq_xgboost_model import AirQualityXGBoostPredictor
 
 router = APIRouter(prefix="/predict", tags=["predictions"])
 app = FastAPI(title="Weather & Air Quality Prediction API")
+ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "*").split(",")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -96,7 +98,7 @@ class WeatherPredictionService:
         elif 'timestamp' in df.columns:
             df['datetime'] = pd.to_datetime(df['timestamp'], unit='s', errors='coerce')
         else:
-            df['datetime'] = pd.date_range(end=pd.Timestamp.now(), periods=len(df), freq='H')
+            df['datetime'] = pd.date_range(end=pd.Timestamp.now(), periods=len(df), freq='h')
 
         if df['datetime'].isna().any():
             raise HTTPException(status_code=400, detail='datetime values must be parseable')
@@ -344,3 +346,8 @@ async def health_check() -> Dict[str, Any]:
     }
 
 app.include_router(router)
+
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.getenv("PORT", 8000))
+    uvicorn.run("prediction_api:app", host="0.0.0.0", port=port, reload=False)

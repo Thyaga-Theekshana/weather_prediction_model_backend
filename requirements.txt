@@ -18,6 +18,9 @@ matplotlib==3.8.2
 # API
 flask==3.0.0
 flask-cors==4.0.0
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+pydantic==2.5.2
 
 # Automation & Scheduling
 schedule==1.2.0
