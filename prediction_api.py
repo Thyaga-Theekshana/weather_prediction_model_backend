@@ -1,220 +1,93 @@
-from datetime import datetime
-from typing import Any, Dict, List, Optional
-import json
-import os
-from pathlib import Path
+"""
+Weather Prediction API
+Flask server to serve weather predictions
+"""
 
+from flask import Flask, request, jsonify
+from flask_cors import CORS
 import numpy as np
 import pandas as pd
-from fastapi import APIRouter, FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
-from tensorflow.keras.models import load_model
+import torch
+import joblib
+import json
+from datetime import datetime, timedelta
+import os
 
-from train_aq_xgboost_model import AirQualityXGBoostPredictor
+import config
 
-router = APIRouter(prefix="/predict", tags=["predictions"])
-app = FastAPI(title="Weather & Air Quality Prediction API")
-ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "*").split(",")
+import open_meteo_client
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+app = Flask(__name__)
+CORS(app)
 
-BASE_DIR = Path(__file__).resolve().parent
-MODEL_DIR = BASE_DIR / 'models'
-BEST_LSTM_MODEL = BASE_DIR / 'best_lstm_model.pth'
-
-
-class PredictionRequest(BaseModel):
-    records: List[Dict[str, Any]]
-
-
-class WeatherPredictionPayload(BaseModel):
-    temperature: float = Field(..., validation_alias='temp')
-    humidity: float
-    pressure: float
-    aqi: float
-    pm2_5: float = Field(..., validation_alias='pm25')
-    light: float
-    datetime: Optional[datetime] = None
-    timestamp: Optional[float] = None
-
-    model_config = {
-        'populate_by_name': True,
-        'extra': 'ignore',
-    }
-
-
-class WeatherPredictionService:
-    FEATURE_ORDER = ['temperature', 'humidity', 'pressure', 'aqi', 'pm2_5', 'light']
-    LOOKBACK_STEPS = 24
-
-    def __init__(self, model_dir: Path = MODEL_DIR):
-        self.model_dir = model_dir
+class PredictionService:
+    def __init__(self, model_dir=None):
+        self.model_dir = model_dir or config.MODEL_DIR
         self.model = None
-        self.scaler_X_mean = None
-        self.scaler_X_scale = None
-        self.scaler_y_mean = None
-        self.scaler_y_scale = None
-        self.load_model()
-
-    def load_model(self) -> None:
-        model_path = self.model_dir / 'lstm_weather_model.keras'
-        scaler_path = self.model_dir / 'lstm_scalers.npz'
-
-        if not self.model_dir.exists() or not self.model_dir.is_dir():
-            raise FileNotFoundError(f'Model directory not found: {self.model_dir}')
-        if not model_path.exists():
-            raise FileNotFoundError(f'Weather model file not found: {model_path}')
-        if not scaler_path.exists():
-            raise FileNotFoundError(f'Scaler file not found: {scaler_path}')
-
+        self.scaler_X = None
+        self.scaler_y = None
+        self.metadata = None
+        self.model_type = 'lstm'  # or 'xgboost'
+        
+        self.load_latest_model()
+    
+    def load_latest_model(self):
+        """Load the most recent trained model"""
         try:
-            self.model = load_model(str(model_path))
-        except Exception as exc:
-            raise RuntimeError(f'Failed to load Keras weather LSTM model: {exc}') from exc
+            if not os.path.isdir(self.model_dir):
+                print(f"Model directory not found: {self.model_dir}")
+                return False
 
-        try:
-            scaler_data = np.load(str(scaler_path))
-            self.scaler_X_mean = scaler_data['scaler_X_mean']
-            self.scaler_X_scale = scaler_data['scaler_X_scale']
-            self.scaler_y_mean = scaler_data['scaler_y_mean']
-            self.scaler_y_scale = scaler_data['scaler_y_scale']
-        except Exception as exc:
-            raise RuntimeError(f'Failed to load weather scaler data: {exc}') from exc
+            # Find latest LSTM model
+            lstm_files = [f for f in os.listdir(self.model_dir) if f.startswith('lstm_weather_')]
+            if not lstm_files:
+                print(f"No trained models in {self.model_dir}. Run: python train_lstm_model.py")
+                return False
+            latest_lstm = sorted(lstm_files)[-1]
+            timestamp = latest_lstm[len('lstm_weather_'):].replace('.pth', '')
 
-    def _prepare_dataframe(self, records: List[Dict[str, Any]]) -> pd.DataFrame:
-        if not isinstance(records, list) or len(records) == 0:
-            raise HTTPException(status_code=400, detail='records must be a non-empty list')
+            model_path = f'{self.model_dir}/{latest_lstm}'
+            scaler_X_path = f'{self.model_dir}/scaler_X_{timestamp}.pkl'
+            scaler_y_path = f'{self.model_dir}/scaler_y_{timestamp}.pkl'
+            metadata_path = f'{self.model_dir}/lstm_metadata_{timestamp}.json'
 
-        df = pd.DataFrame(records)
-        if 'datetime' in df.columns:
-            df['datetime'] = pd.to_datetime(df['datetime'], errors='coerce')
-        elif 'timestamp' in df.columns:
-            df['datetime'] = pd.to_datetime(df['timestamp'], unit='s', errors='coerce')
-        else:
-            df['datetime'] = pd.date_range(end=pd.Timestamp.now(), periods=len(df), freq='h')
+            with open(metadata_path, 'r') as f:
+                self.metadata = json.load(f)
 
-        if df['datetime'].isna().any():
-            raise HTTPException(status_code=400, detail='datetime values must be parseable')
+            self.scaler_X = joblib.load(scaler_X_path)
+            self.scaler_y = joblib.load(scaler_y_path)
 
-        df = df.sort_values('datetime').reset_index(drop=True)
-        return df
+            from train_lstm_model import WeatherLSTM
+            device = torch.device('cpu')
+            self.model = WeatherLSTM(
+                input_size=self.metadata['input_size'],
+                hidden_size=128,
+                num_layers=2,
+                output_size=self.metadata['output_size']
+            ).to(device)
 
-    def predict(self, records: List[Dict[str, Any]]) -> Dict[str, Any]:
-        if self.model is None:
-            raise RuntimeError('Weather model is not loaded')
+            self.model.load_state_dict(torch.load(model_path, map_location=device))
+            self.model.eval()
 
-        df = self._prepare_dataframe(records)
+            self.model_type = 'lstm'
+            print(f"✓ Loaded LSTM model from {timestamp}")
+            return True
 
-        for feature in self.FEATURE_ORDER:
-            if feature not in df.columns:
-                raise HTTPException(status_code=400, detail=f'Missing required feature: {feature}')
-
-        X_seq = df[self.FEATURE_ORDER].values
-        if len(X_seq) < self.LOOKBACK_STEPS:
-            pad_count = self.LOOKBACK_STEPS - len(X_seq)
-            pad_rows = np.repeat(X_seq[[0]], pad_count, axis=0)
-            X_seq = np.vstack([pad_rows, X_seq])
-
-        X_seq = X_seq[-self.LOOKBACK_STEPS:]
-        predictions = self._predict_sequence(X_seq)
-
-        return {
-            'model_type': 'weather',
-            'predictions': predictions
-        }
-
-    def _predict_sequence(self, X_seq: np.ndarray) -> Dict[str, float]:
-        X_scaled = (X_seq - self.scaler_X_mean) / self.scaler_X_scale
-        X_scaled = X_scaled.reshape(1, self.LOOKBACK_STEPS, len(self.FEATURE_ORDER))
-
-        predictions_scaled = self.model.predict(X_scaled, verbose=0)
-        predictions = predictions_scaled[0] * self.scaler_y_scale + self.scaler_y_mean
-
-        return {
-            feature: float(predictions[idx])
-            for idx, feature in enumerate(self.FEATURE_ORDER)
-        }
-
-    def forecast(self, records: List[Dict[str, Any]], hours: int = 24) -> List[Dict[str, Any]]:
-        df = self._prepare_dataframe(records)
-
-        for feature in self.FEATURE_ORDER:
-            if feature not in df.columns:
-                raise HTTPException(status_code=400, detail=f'Missing required feature: {feature}')
-
-        X_seq = df[self.FEATURE_ORDER].values
-        if len(X_seq) < self.LOOKBACK_STEPS:
-            pad_count = self.LOOKBACK_STEPS - len(X_seq)
-            pad_rows = np.repeat(X_seq[[0]], pad_count, axis=0)
-            X_seq = np.vstack([pad_rows, X_seq])
-
-        X_seq = X_seq[-self.LOOKBACK_STEPS:].astype(float)
-        last_datetime = df['datetime'].iloc[-1]
-
-        forecast_points: List[Dict[str, Any]] = []
-        for step in range(1, hours + 1):
-            predicted_values = self._predict_sequence(X_seq)
-            forecast_point = {
-                'datetime': (last_datetime + pd.Timedelta(hours=step)).isoformat(),
-                **predicted_values
-            }
-            forecast_points.append(forecast_point)
-
-            X_seq = np.vstack([
-                X_seq[1:],
-                np.array([predicted_values[feature] for feature in self.FEATURE_ORDER], dtype=float)
-            ])
-
-        return forecast_points
-
-
-def aqi_to_label(aqi: float) -> str:
-    if aqi <= 50:
-        return 'Good'
-    if aqi <= 100:
-        return 'Moderate'
-    if aqi <= 150:
-        return 'Unhealthy for Sensitive Groups'
-    if aqi <= 200:
-        return 'Unhealthy'
-    if aqi <= 300:
-        return 'Very Unhealthy'
-    return 'Hazardous'
-
-
-class AirQualityPredictionService:
-    def __init__(self, model_dir: Path = MODEL_DIR):
-        self.model_dir = model_dir
-        self.predictor = AirQualityXGBoostPredictor()
-        self.predictor.load_latest_models(output_dir=str(self.model_dir))
-
-    def _prepare_dataframe(self, records: List[Dict[str, Any]]) -> pd.DataFrame:
-        if not isinstance(records, list) or len(records) == 0:
-            raise HTTPException(status_code=400, detail='records must be a non-empty list')
-
-        df = pd.DataFrame(records)
+        except Exception as e:
+            print(f"Error loading model: {e}")
+            return False
+    
+    def _ensure_datetime(self, df):
         if 'datetime' not in df.columns:
             if 'timestamp' in df.columns:
-                df['datetime'] = pd.to_datetime(df['timestamp'], unit='s', errors='coerce')
+                df['datetime'] = pd.to_datetime(df['timestamp'], unit='s')
             else:
-                raise HTTPException(status_code=400, detail='Each record must include datetime or timestamp')
-        else:
-            df['datetime'] = pd.to_datetime(df['datetime'], errors='coerce')
-
-        if df['datetime'].isna().any():
-            raise HTTPException(status_code=400, detail='datetime values must be parseable')
-
-        df = df.sort_values('datetime').reset_index(drop=True)
+                raise ValueError('Missing datetime or timestamp column')
+        df['datetime'] = pd.to_datetime(df['datetime'])
         return df
 
-    def _add_time_features(self, df: pd.DataFrame) -> pd.DataFrame:
+    def _add_time_features(self, df):
+        df = self._ensure_datetime(df)
         df['hour'] = df['datetime'].dt.hour
         df['month'] = df['datetime'].dt.month
         df['hour_sin'] = np.sin(2 * np.pi * df['hour'] / 24)
@@ -223,131 +96,237 @@ class AirQualityPredictionService:
         df['month_cos'] = np.cos(2 * np.pi * df['month'] / 12)
         return df
 
-    def _build_feature_vector(self, df: pd.DataFrame) -> np.ndarray:
-        feature_columns = self.predictor.feature_columns
-        lookback_length = self.predictor.lookback_hours * 60
-        for feature in feature_columns:
-            if feature not in df.columns:
-                df[feature] = 0.0
+    def _prepare_dataframe(self, data):
+        if isinstance(data, dict):
+            records = []
+            for key, value in data.items():
+                if not isinstance(value, dict):
+                    continue
+                row = dict(value)
+                if str(key).isdigit():
+                    row['timestamp'] = int(key)
+                row['datetime'] = row.get('datetime') or row.get('timestamp')
+                records.append(row)
+            df = pd.DataFrame(records)
+        else:
+            df = pd.DataFrame(data)
 
-        X_seq = df[feature_columns].values
-        if len(X_seq) < lookback_length:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f'Air quality prediction requires at least {lookback_length} rows, '
-                    f'but received {len(X_seq)}'
-                )
-            )
+        df = self._ensure_datetime(df)
+        df = df.sort_values('datetime').reset_index(drop=True)
+        return df
 
-        X_seq = X_seq[-lookback_length:]
-        features = []
-        for col_idx, col in enumerate(feature_columns):
-            col_data = X_seq[:, col_idx]
-            features.extend([
-                float(col_data[-1]),
-                float(np.mean(col_data)),
-                float(np.std(col_data)),
-                float(col_data[-1] - col_data[0]),
-                float(np.max(col_data)),
-                float(np.min(col_data))
-            ])
+    def predict(self, recent_data):
+        """
+        Make prediction for next 48 hours
+        
+        Args:
+            recent_data: DataFrame with last 24 hours of sensor readings
+        
+        Returns:
+            Dictionary with predictions for each parameter
+        """
+        if self.model is None:
+            raise ValueError("No model loaded")
+        
+        try:
+            # Prepare features
+            feature_cols = self.metadata['feature_columns']
+            X_seq = recent_data[feature_cols].values
+            
+            # Ensure correct sequence length
+            expected_length = self.metadata['lookback_hours'] * 60
+            if len(X_seq) < expected_length:
+                # Pad with last value if needed
+                padding = np.repeat(X_seq[-1:], expected_length - len(X_seq), axis=0)
+                X_seq = np.vstack([padding, X_seq])
+            elif len(X_seq) > expected_length:
+                X_seq = X_seq[-expected_length:]
+            
+            # Normalize
+            X_scaled = self.scaler_X.transform(X_seq)
+            X_scaled = X_scaled.reshape(1, expected_length, len(feature_cols))
+            
+            # Predict
+            with torch.no_grad():
+                X_tensor = torch.FloatTensor(X_scaled)
+                predictions = self.model(X_tensor).numpy()
+            
+            # Inverse transform
+            predictions = self.scaler_y.inverse_transform(predictions)
+            
+            # Format results
+            result = {}
+            for i, param in enumerate(self.metadata['target_params']):
+                result[param] = float(predictions[0, i])
+            
+            result['forecast_time'] = datetime.now().isoformat()
+            result['forecast_horizon_hours'] = self.metadata['forecast_horizon']
+            
+            return result
+        
+        except Exception as e:
+            raise ValueError(f"Prediction error: {str(e)}")
 
-        return np.array(features, dtype=float).reshape(1, -1)
+# Initialize service
+prediction_service = PredictionService()
 
-    def predict(self, records: List[Dict[str, Any]]) -> Dict[str, Any]:
-        df = self._prepare_dataframe(records)
-        df = self._add_time_features(df)
-        X_input = self._build_feature_vector(df)
-
-        predictions: Dict[str, float] = {}
-        for param, model in self.predictor.models.items():
-            scaler = self.predictor.scalers.get(param)
-            if scaler is None:
-                continue
-            X_scaled = scaler.transform(X_input)
-            pred = model.predict(X_scaled)
-            predictions[param] = float(pred[0])
-
-        return {
-            'model_type': 'air_quality',
-            'forecast_horizon_hours': int(self.predictor.forecast_horizon),
-            'predictions': predictions
+@app.route('/', methods=['GET'])
+def home():
+    """API home page"""
+    return jsonify({
+        'service': 'Weather Prediction API',
+        'version': '1.0',
+        'model_type': prediction_service.model_type,
+        'endpoints': {
+            '/predict': 'POST - Make weather prediction',
+            '/forecast/7day': 'GET - Open-Meteo 7-day forecast (Moratuwa)',
+            '/health': 'GET - Check API health',
+            '/model-info': 'GET - Get model information'
         }
+    })
 
-
-try:
-    weather_service = WeatherPredictionService()
-except Exception as exc:
-    weather_service = None
-    load_weather_error = str(exc)
-
-try:
-    air_quality_service = AirQualityPredictionService()
-except Exception as exc:
-    air_quality_service = None
-    load_aq_error = str(exc)
-
-
-@router.post('/weather')
-async def predict_weather(payload: WeatherPredictionPayload) -> Dict[str, Any]:
-    print('--- RECEIVED PAYLOAD FROM FRONTEND ---', payload)
-    if weather_service is None:
-        raise HTTPException(status_code=503, detail=f'Weather model unavailable: {load_weather_error}')
-
-    record = payload.model_dump(by_alias=False, exclude_none=True)
-    try:
-        predictions = weather_service.predict([record])
-    except Exception as e:
-        print('LOGGED ERROR:', str(e))
-        raise HTTPException(status_code=400, detail=str(e))
-
-    forecast = weather_service.forecast([record], hours=24)
-    return {
-        'model_type': predictions.get('model_type', 'weather'),
-        'temperature': predictions['predictions']['temperature'],
-        'humidity': predictions['predictions']['humidity'],
-        'pressure': predictions['predictions']['pressure'],
-        'aqi': predictions['predictions']['aqi'],
-        'pm25': predictions['predictions']['pm2_5'],
-        'light': predictions['predictions']['light'],
-        'predicted_temperature': predictions['predictions']['temperature'],
-        'predicted_aqi': predictions['predictions']['aqi'],
-        'predicted_pm25': predictions['predictions']['pm2_5'],
-        'predicted_air_quality': aqi_to_label(predictions['predictions']['aqi']),
-        'forecast_horizon_hours': 24,
-        'hourly_forecast': forecast,
-        'forecast_series': {
-            feature: [point[feature] for point in forecast]
-            for feature in weather_service.FEATURE_ORDER
-        },
-    }
-
-
-@router.post('/air-quality')
-async def predict_air_quality(request: PredictionRequest) -> Dict[str, Any]:
-    if air_quality_service is None:
-        raise HTTPException(status_code=503, detail=f'Air quality model unavailable: {load_aq_error}')
-
-    response = air_quality_service.predict(request.records)
-    return response
-
-
-@router.get('/health')
-async def health_check() -> Dict[str, Any]:
-    return {
+@app.route('/health', methods=['GET'])
+def health():
+    """Health check endpoint"""
+    return jsonify({
         'status': 'healthy',
-        'weather_model_loaded': weather_service is not None,
-        'air_quality_model_loaded': air_quality_service is not None,
-        'errors': {
-            'weather': None if weather_service is not None else load_weather_error,
-            'air_quality': None if air_quality_service is not None else load_aq_error
-        }
+        'model_loaded': prediction_service.model is not None,
+        'timestamp': datetime.now().isoformat()
+    })
+
+@app.route('/model-info', methods=['GET'])
+def model_info():
+    """Get model information"""
+    if prediction_service.metadata is None:
+        return jsonify({'error': 'No model loaded'}), 500
+    
+    return jsonify({
+        'model_type': prediction_service.model_type,
+        'metadata': prediction_service.metadata
+    })
+
+@app.route('/forecast/7day', methods=['GET'])
+def forecast_7day():
+    """Live 7-day forecast from Open-Meteo for University of Moratuwa (no ML model required)."""
+    try:
+        forecast = open_meteo_client.fetch_7day_forecast()
+        return jsonify({'success': True, 'forecast': forecast})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 502
+
+@app.route('/predict', methods=['POST'])
+def predict():
+    """
+    Make weather prediction
+    
+    Expected JSON payload:
+    {
+        "data": [
+            {
+                "datetime": "2024-01-01T00:00:00",
+                "temperature": 25.0,
+                "humidity": 65.0,
+                ...
+            },
+            ...
+        ]
     }
+    """
+    try:
+        data = request.get_json() or {}
 
-app.include_router(router)
+        if 'data' not in data:
+            return jsonify({'error': 'Missing "data" field'}), 400
 
-if __name__ == "__main__":
-    import uvicorn
-    port = int(os.getenv("PORT", 8000))
-    uvicorn.run("prediction_api:app", host="0.0.0.0", port=port, reload=False)
+        df = pd.DataFrame(data['data'])
+        predictions = prediction_service.predict(df)
+
+        return jsonify({
+            'success': True,
+            'predictions': predictions
+        })
+
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+@app.route('/predict-from-firebase', methods=['POST'])
+def predict_from_firebase():
+    """
+    Fetch latest data from Firebase and make prediction.
+
+    The service uses secure configuration from the environment or .env file.
+    Optional request payload fields:
+    {
+        "firebase_url": "https://your-project.firebaseio.com"
+    }
+    """
+    try:
+        import firebase_admin
+        from firebase_admin import db
+        from firebase_admin import credentials
+
+        data = request.get_json() or {}
+        firebase_url = data.get('firebase_url') or config.FIREBASE_DATABASE_URL
+        if not firebase_url:
+            return jsonify({'error': 'Missing "firebase_url" field and no FIREBASE_DATABASE_URL configured'}), 400
+
+        if not firebase_admin._apps:
+            if config.FIREBASE_CREDENTIALS and os.path.exists(config.FIREBASE_CREDENTIALS):
+                cred = credentials.Certificate(config.FIREBASE_CREDENTIALS)
+                firebase_admin.initialize_app(cred, {
+                    'databaseURL': firebase_url
+                })
+            else:
+                firebase_admin.initialize_app(options={
+                    'databaseURL': firebase_url
+                })
+
+        ref = db.reference('/weather_data')
+        cutoff_time = int((datetime.now() - timedelta(hours=24)).timestamp())
+        query = ref.order_by_key().start_at(str(cutoff_time))
+        recent_data = query.get()
+
+        if not recent_data:
+            return jsonify({'error': 'No recent data found in Firebase'}), 404
+
+        records = []
+        for key, reading in recent_data.items():
+            if not isinstance(reading, dict):
+                continue
+            row = dict(reading)
+            if str(key).isdigit():
+                row['timestamp'] = int(key)
+                row['datetime'] = datetime.fromtimestamp(int(key))
+            if 'weather' in reading and isinstance(reading['weather'], dict):
+                row.update(reading['weather'])
+            if 'air_quality' in reading and isinstance(reading['air_quality'], dict):
+                row.update(reading['air_quality'])
+            records.append(row)
+
+        if not records:
+            return jsonify({'error': 'No valid weather records found in Firebase'}), 404
+
+        df = pd.DataFrame(records)
+        predictions = prediction_service.predict(df)
+        return jsonify({
+            'success': True,
+            'predictions': predictions
+        })
+
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+if __name__ == '__main__':
+    port = config.API_PORT
+    print("\n=== Weather Prediction API ===")
+    print(f"Model loaded: {prediction_service.model is not None}")
+    print(f"\nStarting server on http://localhost:{port}")
+    print("Press Ctrl+C to stop\n")
+    
+    app.run(host='0.0.0.0', port=port, debug=False)

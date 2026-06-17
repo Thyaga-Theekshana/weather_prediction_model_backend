@@ -14,6 +14,34 @@ import joblib
 import json
 from datetime import datetime
 import matplotlib.pyplot as plt
+import os
+
+WIND_DIRECTION_TO_DEGREES = {
+    'N': 0, 'NNE': 22.5, 'NE': 45, 'ENE': 67.5,
+    'E': 90, 'ESE': 112.5, 'SE': 135, 'SSE': 157.5,
+    'S': 180, 'SSW': 202.5, 'SW': 225, 'WSW': 247.5,
+    'W': 270, 'WNW': 292.5, 'NW': 315, 'NNW': 337.5,
+}
+
+CSV_COLUMN_MAP = {
+    'Timestamp': 'datetime',
+    'Temperature': 'temperature',
+    'Humidity': 'humidity',
+    'Pressure': 'pressure',
+    'Rainfall': 'rainfall',
+    'Light_Intensity': 'light_intensity',
+    'Wind_Speed': 'wind_speed',
+    'Wind_Direction': 'wind_direction',
+    'VOC_Index': 'voc',
+    'NOx_Index': 'nox',
+    'PM2_5': 'pm2_5',
+    'PM1_0': 'pm1_0',
+    'PM10': 'pm10',
+    'AQI': 'aqi',
+    'aqi': 'aqi',
+    'CO2': 'co2',
+    'CO': 'co',
+}
 
 class WeatherDataset(Dataset):
     """PyTorch Dataset for weather time-series"""
@@ -60,7 +88,6 @@ class WeatherLSTM(nn.Module):
         # Apply attention
         attention_weights = torch.softmax(self.attention(lstm_out), dim=1)
         context = torch.sum(attention_weights * lstm_out, dim=1)
-        context = self.dropout(context)
         
         # Fully connected layers
         out = self.relu(self.fc1(context))
@@ -70,7 +97,7 @@ class WeatherLSTM(nn.Module):
         return out
 
 class WeatherLSTMPredictor:
-    def __init__(self, lookback_hours=1, forecast_horizon=48):
+    def __init__(self, lookback_hours=24, forecast_horizon=48):
         self.lookback_hours = lookback_hours
         self.forecast_horizon = forecast_horizon
         self.model = None
@@ -89,26 +116,34 @@ class WeatherLSTMPredictor:
         """Load and preprocess data"""
         print(f"Loading data from {csv_path}...")
         df = pd.read_csv(csv_path)
-        df.columns = df.columns.str.lower()
-        df = df.rename(columns={
-            'voc_index': 'voc',
-            'pm2_5': 'pm2_5',
-            'co2': 'co2',
-            'light_intensity': 'light_intensity',
-            'wind_speed': 'wind_speed',
-            'wind_direction': 'wind_direction',
-            'humidity': 'humidity',
-            'temperature': 'temperature',
-            'pressure': 'pressure',
-            'rainfall': 'rainfall'
-        })
+        df = df.rename(columns={k: v for k, v in CSV_COLUMN_MAP.items() if k in df.columns})
+
+        if 'datetime' not in df.columns:
+            raise ValueError('CSV must include a datetime or Timestamp column')
 
         df['datetime'] = pd.to_datetime(df['datetime'])
         df = df.sort_values('datetime').reset_index(drop=True)
-        
+
+        if 'wind_direction' in df.columns and df['wind_direction'].dtype == object:
+            df['wind_direction'] = df['wind_direction'].map(WIND_DIRECTION_TO_DEGREES).fillna(180)
+
+        numeric_cols = [
+            'temperature', 'humidity', 'pressure', 'rainfall', 'light_intensity',
+            'wind_speed', 'wind_direction', 'voc', 'nox', 'pm2_5', 'pm10', 'co2', 'co'
+        ]
+        for col in numeric_cols:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+
+        df['hour'] = df['datetime'].dt.hour
+        df['month'] = df['datetime'].dt.month
+        df['hour_sin'] = np.sin(2 * np.pi * df['hour'] / 24)
+        df['hour_cos'] = np.cos(2 * np.pi * df['hour'] / 24)
+        df['month_sin'] = np.sin(2 * np.pi * df['month'] / 12)
+        df['month_cos'] = np.cos(2 * np.pi * df['month'] / 12)
+
         # Resample to 1-minute intervals
-        df = df.set_index('datetime')
-        df = df.resample('1min').mean(numeric_only=True).interpolate()
+        df = df.set_index('datetime').resample('1min').mean(numeric_only=True).interpolate()
         df = df.reset_index()
         
         print(f"✓ Loaded {len(df)} records")
@@ -131,15 +166,6 @@ class WeatherLSTMPredictor:
         
         # Target columns
         target_cols = [col for col in self.target_params if col in df.columns]
-        
-        if len(feature_cols) == 0:
-            raise ValueError(
-                'No feature columns found in the CSV. Check your header mapping and feature column names.'
-            )
-        if len(target_cols) == 0:
-            raise ValueError(
-                'No target columns found in the CSV. Check your target parameter names.'
-            )
         
         X_list = []
         y_list = []
@@ -173,42 +199,31 @@ class WeatherLSTMPredictor:
         df = self.load_data(csv_path)
         X, y = self.create_sequences(df)
         
-        # Split data (80% train, 10% validation, 10% test)
-        n_total = len(X)
-        train_end = int(n_total * 0.8)
-        val_end = train_end + int(n_total * 0.1)
-        if val_end >= n_total:
-            val_end = n_total - 1
-        
-        X_train, X_val, X_test = X[:train_end], X[train_end:val_end], X[val_end:]
-        y_train, y_val, y_test = y[:train_end], y[train_end:val_end], y[val_end:]
+        # Split data (80% train, 20% test)
+        split_idx = int(len(X) * 0.8)
+        X_train, X_test = X[:split_idx], X[split_idx:]
+        y_train, y_test = y[:split_idx], y[split_idx:]
         
         # Normalize features
         n_samples, n_timesteps, n_features = X_train.shape
         X_train_reshaped = X_train.reshape(-1, n_features)
-        X_val_reshaped = X_val.reshape(-1, n_features)
         X_test_reshaped = X_test.reshape(-1, n_features)
         
         X_train_scaled = self.scaler_X.fit_transform(X_train_reshaped)
-        X_val_scaled = self.scaler_X.transform(X_val_reshaped)
         X_test_scaled = self.scaler_X.transform(X_test_reshaped)
         
         X_train_scaled = X_train_scaled.reshape(n_samples, n_timesteps, n_features)
-        X_val_scaled = X_val_scaled.reshape(len(X_val), n_timesteps, n_features)
         X_test_scaled = X_test_scaled.reshape(len(X_test), n_timesteps, n_features)
         
         # Normalize targets
         y_train_scaled = self.scaler_y.fit_transform(y_train)
-        y_val_scaled = self.scaler_y.transform(y_val)
         y_test_scaled = self.scaler_y.transform(y_test)
         
         # Create datasets
         train_dataset = WeatherDataset(X_train_scaled, y_train_scaled)
-        val_dataset = WeatherDataset(X_val_scaled, y_val_scaled)
         test_dataset = WeatherDataset(X_test_scaled, y_test_scaled)
         
         train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-        val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
         test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
         
         # Initialize model
@@ -224,16 +239,13 @@ class WeatherLSTMPredictor:
         criterion = nn.MSELoss()
         optimizer = torch.optim.Adam(self.model.parameters(), lr=learning_rate)
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode='min', factor=0.5, patience=5
+            optimizer, mode='min', factor=0.5, patience=5, verbose=True
         )
         
         # Training loop
         train_losses = []
-        val_losses = []
-        best_val_loss = float('inf')
-        epochs_no_improve = 0
-        patience = 5
-        best_model_path = 'best_lstm_model.pth'
+        test_losses = []
+        best_test_loss = float('inf')
         
         print("\nTraining...")
         for epoch in range(epochs):
@@ -255,46 +267,38 @@ class WeatherLSTMPredictor:
             train_loss /= len(train_loader)
             train_losses.append(train_loss)
             
-            # Validate
+            # Evaluate
             self.model.eval()
-            val_loss = 0
+            test_loss = 0
             with torch.no_grad():
-                for X_batch, y_batch in val_loader:
+                for X_batch, y_batch in test_loader:
                     X_batch = X_batch.to(self.device)
                     y_batch = y_batch.to(self.device)
                     outputs = self.model(X_batch)
                     loss = criterion(outputs, y_batch)
-                    val_loss += loss.item()
+                    test_loss += loss.item()
             
-            val_loss /= len(val_loader)
-            val_losses.append(val_loss)
+            test_loss /= len(test_loader)
+            test_losses.append(test_loss)
             
-            scheduler.step(val_loss)
+            scheduler.step(test_loss)
             
             if (epoch + 1) % 10 == 0:
-                print(f"Epoch [{epoch+1}/{epochs}] - Train Loss: {train_loss:.6f}, Val Loss: {val_loss:.6f}")
+                print(f"Epoch [{epoch+1}/{epochs}] - Train Loss: {train_loss:.6f}, Test Loss: {test_loss:.6f}")
             
-            # Save best model and early stop on validation loss
-            if val_loss < best_val_loss:
-                best_val_loss = val_loss
+            # Save best model
+            if test_loss < best_test_loss:
+                best_test_loss = test_loss
                 best_model_state = self.model.state_dict()
-                torch.save(best_model_state, best_model_path)
-                epochs_no_improve = 0
-                print(f"  Best model saved to {best_model_path} (Val Loss: {val_loss:.6f})")
-            else:
-                epochs_no_improve += 1
-                if epochs_no_improve >= patience:
-                    print(f"Early stopping at epoch {epoch+1} after {epochs_no_improve} epochs with no improvement.")
-                    break
         
         # Load best model
         self.model.load_state_dict(best_model_state)
         
-        # Final evaluation on test set
+        # Final evaluation
         print("\n=== Final Evaluation ===")
         self.evaluate(test_loader)
         
-        return train_losses, val_losses
+        return train_losses, test_losses
     
     def evaluate(self, test_loader):
         """Evaluate model performance"""
@@ -309,14 +313,14 @@ class WeatherLSTMPredictor:
                 all_preds.append(outputs.cpu().numpy())
                 all_targets.append(y_batch.numpy())
         
-        predictions_scaled = np.vstack(all_preds)
-        targets_scaled = np.vstack(all_targets)
+        predictions = np.vstack(all_preds)
+        targets = np.vstack(all_targets)
         
-        # Inverse transform back to original target scale
-        predictions = self.scaler_y.inverse_transform(predictions_scaled)
-        targets = self.scaler_y.inverse_transform(targets_scaled)
+        # Inverse transform
+        predictions = self.scaler_y.inverse_transform(predictions)
+        targets = self.scaler_y.inverse_transform(targets)
         
-        # Calculate metrics on original-scale predictions and targets
+        # Calculate metrics for each parameter
         for i, param in enumerate(self.target_params):
             rmse = np.sqrt(mean_squared_error(targets[:, i], predictions[:, i]))
             mae = mean_absolute_error(targets[:, i], predictions[:, i])
@@ -359,18 +363,27 @@ class WeatherLSTMPredictor:
         print(f"\n✓ Model saved to {output_dir}/")
 
 def main():
-    csv_path = 'data/weather_data_latest.csv'
+    csv_path = os.getenv('TRAINING_CSV', 'data/moratuwa_open_meteo.csv')
+    if not os.path.exists(csv_path):
+        fallback = 'moratuwa_sensors_20k_dataset.csv'
+        if os.path.exists(fallback):
+            csv_path = fallback
+        else:
+            raise FileNotFoundError(
+                f'Training dataset not found: {csv_path}. '
+                'Run: python fetch_moratuwa_data.py --start 2026-04-01'
+            )
     
     predictor = WeatherLSTMPredictor(
-        lookback_hours=1,
+        lookback_hours=24,
         forecast_horizon=48
     )
     
     train_losses, test_losses = predictor.train(
         csv_path,
-        epochs=100,
+        epochs=int(os.getenv('TRAINING_EPOCHS', '100')),
         batch_size=32,
-        learning_rate=0.0005
+        learning_rate=0.001
     )
     
     predictor.save_model()

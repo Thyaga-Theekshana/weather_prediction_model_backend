@@ -14,6 +14,7 @@ def get_env(name, default=None, required=False):
 
 
 MODEL_DIR = get_env('MODEL_DIR', 'models')
+API_PORT = int(get_env('API_PORT', '5001'))
 FIREBASE_DATABASE_URL = get_env('FIREBASE_DATABASE_URL', get_env('FIREBASE_URL'))
 FIREBASE_CREDENTIALS = get_env('FIREBASE_CREDENTIALS', get_env('GOOGLE_APPLICATION_CREDENTIALS'))
 
