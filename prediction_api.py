@@ -22,11 +22,7 @@ import config
 import open_meteo_client
 
 app = Flask(__name__)
-CORS(
-    app,
-    resources={r"/*": {"origins": ["http://127.0.0.1:8080", "http://localhost:8080", "http://127.0.0.1:8000", "http://localhost:8000"]}},
-    supports_credentials=True,
-)
+CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
 
 DATASET_PATH = os.path.join(os.path.dirname(__file__), 'moratuwa_sensors_20k_dataset.csv')
 
