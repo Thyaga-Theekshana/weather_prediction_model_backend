@@ -152,7 +152,7 @@ class LivePredictionService:
             df = self.add_time_features(df)
             feature_cols = self.metadata['feature_columns']
             df = df.reindex(columns=feature_cols)
-            df = df.fillna(method='ffill').fillna(method='bfill').fillna(0)
+            df = df.ffill().bfill().fillna(0)
             
             missing_cols = [col for col in feature_cols if col not in df.columns]
             if missing_cols:
@@ -172,7 +172,7 @@ class LivePredictionService:
             
             # Normalize
             X_scaled = self.scaler_X.transform(X_seq)
-            X_scaled = X_scaled.reshape(1, expected_length, len(available_cols))
+            X_scaled = X_scaled.reshape(1, expected_length, len(feature_cols))
             
             # Predict
             with torch.no_grad():
@@ -219,13 +219,23 @@ class LivePredictionService:
     
     def background_updater(self):
         """Background thread to update predictions periodically"""
+        consecutive_errors = 0
+        max_consecutive_errors = 10
         while True:
             try:
                 self.update_prediction_cache()
+                consecutive_errors = 0  # reset on success
                 time.sleep(self.prediction_cache_minutes * 60)
             except Exception as e:
-                print(f"Background updater error: {e}")
-                time.sleep(60)  # Wait 1 minute before retrying
+                consecutive_errors += 1
+                backoff = min(300, 60 * consecutive_errors)  # max 5 min backoff
+                print(f"Background updater error ({consecutive_errors}/{max_consecutive_errors}): {e}")
+                if consecutive_errors >= max_consecutive_errors:
+                    print("Max consecutive errors reached. Background updater pausing for 30 minutes.")
+                    time.sleep(1800)
+                    consecutive_errors = 0
+                else:
+                    time.sleep(backoff)
     
     def start_background_updater(self):
         """Start background prediction updater"""

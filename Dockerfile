@@ -1,27 +1,23 @@
 FROM python:3.10-slim
 
-# Set environment variables
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    PORT=8000
-
-# Set work directory
+# Set working directory
 WORKDIR /app
 
-# Install system dependencies (needed for compiling some python packages if necessary)
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    && rm -rf /var/lib/apt/lists/*
-
-# Install dependencies
+# Copy requirements first for better layer caching
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy project
+# Install dependencies (use PyTorch CPU-only index to get lighter build)
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cpu
+
+# Copy the rest of the application
 COPY . .
 
-# Expose port
-EXPOSE $PORT
+# Ensure required directories exist
+RUN mkdir -p models data logs
 
-# Run application
-CMD ["python", "prediction_api.py"]
+# Back4App uses port 8000 by default
+EXPOSE 8000
+
+# Start Flask app with Gunicorn
+CMD ["gunicorn", "prediction_api:app", "--bind", "0.0.0.0:8000", "--timeout", "120", "--workers", "2"]

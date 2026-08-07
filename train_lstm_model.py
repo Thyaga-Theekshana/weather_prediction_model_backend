@@ -142,8 +142,8 @@ class WeatherLSTMPredictor:
         df['month_sin'] = np.sin(2 * np.pi * df['month'] / 12)
         df['month_cos'] = np.cos(2 * np.pi * df['month'] / 12)
 
-        # Resample to 1-minute intervals
-        df = df.set_index('datetime').resample('1min').mean(numeric_only=True).interpolate()
+        # Resample to 1-hour intervals
+        df = df.set_index('datetime').resample('1h').mean(numeric_only=True).interpolate()
         df = df.reset_index()
         
         print(f"✓ Loaded {len(df)} records")
@@ -170,10 +170,10 @@ class WeatherLSTMPredictor:
         X_list = []
         y_list = []
         
-        lookback_samples = self.lookback_hours * 60
-        forecast_samples = self.forecast_horizon * 60
+        lookback_samples = self.lookback_hours
+        forecast_samples = self.forecast_horizon
         
-        for i in range(lookback_samples, len(df) - forecast_samples, 60):  # Step by hour
+        for i in range(lookback_samples, len(df) - forecast_samples, 1):  # Step by hour
             # Input sequence (past data)
             X_seq = df.iloc[i - lookback_samples:i][feature_cols].values
             X_list.append(X_seq)
@@ -239,7 +239,7 @@ class WeatherLSTMPredictor:
         criterion = nn.MSELoss()
         optimizer = torch.optim.Adam(self.model.parameters(), lr=learning_rate)
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode='min', factor=0.5, patience=5, verbose=True
+            optimizer, mode='min', factor=0.5, patience=5
         )
         
         # Training loop

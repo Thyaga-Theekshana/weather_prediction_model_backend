@@ -30,7 +30,7 @@ def _get(url, params):
 
 
 def fetch_weather_archive(start_date: str, end_date: str) -> pd.DataFrame:
-    print(f'Fetching weather archive {start_date} → {end_date} …')
+    print(f'Fetching weather archive {start_date} -> {end_date} \u2026')
     payload = _get(mc.OPEN_METEO_ARCHIVE_URL, {
         'latitude': mc.MORATUWA_LAT,
         'longitude': mc.MORATUWA_LON,

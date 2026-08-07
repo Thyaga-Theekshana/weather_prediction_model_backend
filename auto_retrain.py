@@ -116,14 +116,15 @@ class AutoRetrainingSystem:
         if new_data_points >= self.min_new_data_points:
             reasons.append(f"New data available ({new_data_points} new points)")
         
-        # Check 4: Performance degradation (if we have history)
-        if len(self.performance_history) >= 2:
-            recent_performance = self.performance_history[-1]['rmse']
-            best_performance = min([p['rmse'] for p in self.performance_history])
-            degradation = (recent_performance - best_performance) / best_performance
-            
-            if degradation > self.performance_threshold:
-                reasons.append(f"Performance degraded by {degradation*100:.1f}%")
+        # Check 4: Performance degradation (if we have history with real metrics)
+        valid_history = [p for p in self.performance_history if p.get('rmse') is not None]
+        if len(valid_history) >= 2:
+            recent_performance = valid_history[-1]['rmse']
+            best_performance = min([p['rmse'] for p in valid_history])
+            if best_performance > 0:
+                degradation = (recent_performance - best_performance) / best_performance
+                if degradation > self.performance_threshold:
+                    reasons.append(f"Performance degraded by {degradation*100:.1f}%")
         
         should_train = len(reasons) > 0
         return should_train, reasons
@@ -178,14 +179,146 @@ class AutoRetrainingSystem:
         return results
     
     def evaluate_current_model(self):
-        """Evaluate current model performance on latest data"""
-        # TODO: Implement evaluation on held-out recent data
-        # For now, return dummy metrics
-        return {
-            'rmse': 2.5,
-            'mae': 1.8,
-            'r2': 0.85
+        """Evaluate current LSTM model performance on held-out recent data.
+
+        Loads the latest saved model and its training data, reconstructs the
+        test split (last 20% of samples), runs predictions, and returns real
+        RMSE, MAE, and R² averaged across all target parameters.
+
+        Returns:
+            dict with 'rmse', 'mae', 'r2' keys. Values are None if no model
+            or data are available yet.
+        """
+        import glob
+        import json as _json
+        import torch
+        import joblib
+        import numpy as np
+        from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+
+        models_dir = self.models_dir
+
+        # ── 1. Find the latest LSTM model ──────────────────────────────────
+        lstm_files = sorted(glob.glob(f'{models_dir}/lstm_weather_*.pth'))
+        if not lstm_files:
+            print("⚠ No trained LSTM model found for evaluation — skipping.")
+            return {'rmse': None, 'mae': None, 'r2': None}
+
+        latest_pth = lstm_files[-1]
+        timestamp = os.path.basename(latest_pth)[len('lstm_weather_'):].replace('.pth', '')
+
+        metadata_path = f'{models_dir}/lstm_metadata_{timestamp}.json'
+        scaler_X_path = f'{models_dir}/scaler_X_{timestamp}.pkl'
+        scaler_y_path = f'{models_dir}/scaler_y_{timestamp}.pkl'
+
+        missing = [p for p in [metadata_path, scaler_X_path, scaler_y_path] if not os.path.exists(p)]
+        if missing:
+            print(f"⚠ Evaluation skipped — missing artefacts: {missing}")
+            return {'rmse': None, 'mae': None, 'r2': None}
+
+        with open(metadata_path, 'r') as fh:
+            metadata = _json.load(fh)
+
+        scaler_X = joblib.load(scaler_X_path)
+        scaler_y = joblib.load(scaler_y_path)
+
+        try:
+            from train_lstm_model import WeatherLSTM, WeatherLSTMPredictor
+        except ImportError as exc:
+            print(f"⚠ Could not import LSTM classes: {exc}")
+            return {'rmse': None, 'mae': None, 'r2': None}
+
+        device = torch.device('cpu')
+        model = WeatherLSTM(
+            input_size=metadata['input_size'],
+            hidden_size=128,
+            num_layers=2,
+            output_size=metadata['output_size'],
+        ).to(device)
+        model.load_state_dict(torch.load(latest_pth, map_location=device))
+        model.eval()
+
+        # ── 2. Find the latest training CSV ────────────────────────────────
+        csv_candidates = sorted(glob.glob(f'{self.data_dir}/weather_data_*.csv'))
+        # Also accept the bundled dataset as a last resort
+        if not csv_candidates and os.path.exists('moratuwa_sensors_20k_dataset.csv'):
+            csv_candidates = ['moratuwa_sensors_20k_dataset.csv']
+        if not csv_candidates:
+            print("⚠ No training CSV found for evaluation — skipping.")
+            return {'rmse': None, 'mae': None, 'r2': None}
+
+        csv_path = csv_candidates[-1]
+        print(f"  Evaluating with data: {csv_path}")
+
+        # ── 3. Re-create sequences using the predictor ─────────────────────
+        try:
+            predictor = WeatherLSTMPredictor(
+                lookback_hours=metadata['lookback_hours'],
+                forecast_horizon=metadata['forecast_horizon'],
+            )
+            df = predictor.load_data(csv_path)
+            X, y = predictor.create_sequences(df)
+        except Exception as exc:
+            print(f"⚠ Could not build evaluation sequences: {exc}")
+            return {'rmse': None, 'mae': None, 'r2': None}
+
+        if len(X) < 10:
+            print("⚠ Too few sequences for meaningful evaluation.")
+            return {'rmse': None, 'mae': None, 'r2': None}
+
+        # ── 4. Use the held-out 20% test split (same as training) ──────────
+        split_idx = int(len(X) * 0.8)
+        X_test = X[split_idx:]
+        y_test = y[split_idx:]
+
+        n_samples, n_timesteps, n_features = X_test.shape
+        X_test_reshaped = X_test.reshape(-1, n_features)
+        X_test_scaled = scaler_X.transform(X_test_reshaped).reshape(n_samples, n_timesteps, n_features)
+        y_test_scaled = scaler_y.transform(y_test)
+
+        # ── 5. Run inference ───────────────────────────────────────────────
+        from torch.utils.data import DataLoader, TensorDataset
+        dataset = TensorDataset(
+            torch.FloatTensor(X_test_scaled),
+            torch.FloatTensor(y_test_scaled),
+        )
+        loader = DataLoader(dataset, batch_size=64, shuffle=False)
+
+        all_preds, all_targets = [], []
+        with torch.no_grad():
+            for X_batch, y_batch in loader:
+                preds = model(X_batch.to(device)).cpu().numpy()
+                all_preds.append(preds)
+                all_targets.append(y_batch.numpy())
+
+        predictions = np.vstack(all_preds)
+        targets = np.vstack(all_targets)
+
+        # Inverse-transform back to physical units
+        predictions = scaler_y.inverse_transform(predictions)
+        targets = scaler_y.inverse_transform(targets)
+
+        # ── 6. Compute aggregate metrics across all target parameters ───────
+        rmse_vals, mae_vals, r2_vals = [], [], []
+        target_params = metadata.get('target_params', [])
+        for i, param in enumerate(target_params):
+            rmse_vals.append(float(np.sqrt(mean_squared_error(targets[:, i], predictions[:, i]))))
+            mae_vals.append(float(mean_absolute_error(targets[:, i], predictions[:, i])))
+            r2_vals.append(float(r2_score(targets[:, i], predictions[:, i])))
+            print(f"    {param}: RMSE={rmse_vals[-1]:.4f}  MAE={mae_vals[-1]:.4f}  R²={r2_vals[-1]:.4f}")
+
+        result = {
+            'rmse': round(float(np.mean(rmse_vals)), 4),
+            'mae': round(float(np.mean(mae_vals)), 4),
+            'r2': round(float(np.mean(r2_vals)), 4),
+            'per_param': {p: {'rmse': rmse_vals[i], 'mae': mae_vals[i], 'r2': r2_vals[i]}
+                          for i, p in enumerate(target_params)},
+            'n_test_samples': len(predictions),
+            'evaluated_at': datetime.now().isoformat(),
         }
+        print(f"  ✓ Evaluation complete — RMSE={result['rmse']}  MAE={result['mae']}  R²={result['r2']}")
+        return result
+
     
     def log_training(self, results, data_count):
         """Log training results"""
@@ -196,11 +329,13 @@ class AutoRetrainingSystem:
             'performance': self.evaluate_current_model()
         }
         
-        # Append to performance history
-        self.performance_history.append({
-            'timestamp': log_entry['timestamp'],
-            'rmse': log_entry['performance']['rmse']
-        })
+        # Append to performance history (only when we have real metrics)
+        perf = log_entry['performance']
+        if perf.get('rmse') is not None:
+            self.performance_history.append({
+                'timestamp': log_entry['timestamp'],
+                'rmse': perf['rmse']
+            })
         
         # Keep only last 30 entries
         self.performance_history = self.performance_history[-30:]

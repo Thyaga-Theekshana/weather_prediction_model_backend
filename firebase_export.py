@@ -6,6 +6,7 @@ Exports weather data from Firebase Realtime Database to CSV for ML training
 import firebase_admin
 from firebase_admin import credentials, db
 import pandas as pd
+import numpy as np
 import json
 from datetime import datetime
 import os
@@ -112,14 +113,17 @@ def clean_data(df):
     
     # Forward fill remaining missing values (sensor readings)
     numeric_cols = df.select_dtypes(include=['float64', 'int64']).columns
-    df[numeric_cols] = df[numeric_cols].fillna(method='ffill')
+    df[numeric_cols] = df[numeric_cols].ffill()
     
-    # Validate sensor ranges (remove obvious outliers)
-    df = df[
-        (df['temperature'] >= -50) & (df['temperature'] <= 60) &
-        (df['humidity'] >= 0) & (df['humidity'] <= 100) &
-        (df['pressure'] >= 900) & (df['pressure'] <= 1100)
-    ]
+    # Validate sensor ranges (remove obvious outliers) — only if columns present
+    filter_mask = pd.Series([True] * len(df), index=df.index)
+    if 'temperature' in df.columns:
+        filter_mask &= (df['temperature'] >= -50) & (df['temperature'] <= 60)
+    if 'humidity' in df.columns:
+        filter_mask &= (df['humidity'] >= 0) & (df['humidity'] <= 100)
+    if 'pressure' in df.columns:
+        filter_mask &= (df['pressure'] >= 900) & (df['pressure'] <= 1100)
+    df = df[filter_mask]
     print(f"  After outlier removal: {len(df)}")
     
     return df
@@ -198,5 +202,4 @@ def main():
     print(df[['temperature', 'humidity', 'pressure', 'wind_speed']].describe())
 
 if __name__ == '__main__':
-    import numpy as np
     main()
