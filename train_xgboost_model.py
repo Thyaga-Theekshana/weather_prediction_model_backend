@@ -260,14 +260,23 @@ class WeatherXGBoostPredictor:
         print(f"\n✓ Models saved to {output_dir}/")
 
 def main():
-    # Update this path to your exported CSV
-    csv_path = 'data/weather_data_latest.csv'
-    
+    import os
+    csv_path = os.getenv('TRAINING_CSV', 'data/moratuwa_open_meteo.csv')
+    if not os.path.exists(csv_path):
+        fallback = 'moratuwa_sensors_20k_dataset.csv'
+        if os.path.exists(fallback):
+            csv_path = fallback
+        else:
+            raise FileNotFoundError(
+                f'Training dataset not found: {csv_path}. '
+                'Run: python fetch_moratuwa_data.py --start 2026-04-01'
+            )
+
     predictor = WeatherXGBoostPredictor(
         lookback_hours=24,
         forecast_horizon=48
     )
-    
+
     predictor.train(csv_path)
     predictor.save_models()
 

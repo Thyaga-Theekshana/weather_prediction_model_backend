@@ -14,6 +14,34 @@ import joblib
 import json
 from datetime import datetime
 import matplotlib.pyplot as plt
+import os
+
+WIND_DIRECTION_TO_DEGREES = {
+    'N': 0, 'NNE': 22.5, 'NE': 45, 'ENE': 67.5,
+    'E': 90, 'ESE': 112.5, 'SE': 135, 'SSE': 157.5,
+    'S': 180, 'SSW': 202.5, 'SW': 225, 'WSW': 247.5,
+    'W': 270, 'WNW': 292.5, 'NW': 315, 'NNW': 337.5,
+}
+
+CSV_COLUMN_MAP = {
+    'Timestamp': 'datetime',
+    'Temperature': 'temperature',
+    'Humidity': 'humidity',
+    'Pressure': 'pressure',
+    'Rainfall': 'rainfall',
+    'Light_Intensity': 'light_intensity',
+    'Wind_Speed': 'wind_speed',
+    'Wind_Direction': 'wind_direction',
+    'VOC_Index': 'voc',
+    'NOx_Index': 'nox',
+    'PM2_5': 'pm2_5',
+    'PM1_0': 'pm1_0',
+    'PM10': 'pm10',
+    'AQI': 'aqi',
+    'aqi': 'aqi',
+    'CO2': 'co2',
+    'CO': 'co',
+}
 
 class WeatherDataset(Dataset):
     """PyTorch Dataset for weather time-series"""
@@ -88,11 +116,34 @@ class WeatherLSTMPredictor:
         """Load and preprocess data"""
         print(f"Loading data from {csv_path}...")
         df = pd.read_csv(csv_path)
+        df = df.rename(columns={k: v for k, v in CSV_COLUMN_MAP.items() if k in df.columns})
+
+        if 'datetime' not in df.columns:
+            raise ValueError('CSV must include a datetime or Timestamp column')
+
         df['datetime'] = pd.to_datetime(df['datetime'])
         df = df.sort_values('datetime').reset_index(drop=True)
-        
-        # Resample to 1-minute intervals
-        df = df.set_index('datetime').resample('1min').mean().interpolate()
+
+        if 'wind_direction' in df.columns and df['wind_direction'].dtype == object:
+            df['wind_direction'] = df['wind_direction'].map(WIND_DIRECTION_TO_DEGREES).fillna(180)
+
+        numeric_cols = [
+            'temperature', 'humidity', 'pressure', 'rainfall', 'light_intensity',
+            'wind_speed', 'wind_direction', 'voc', 'nox', 'pm2_5', 'pm10', 'co2', 'co'
+        ]
+        for col in numeric_cols:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+
+        df['hour'] = df['datetime'].dt.hour
+        df['month'] = df['datetime'].dt.month
+        df['hour_sin'] = np.sin(2 * np.pi * df['hour'] / 24)
+        df['hour_cos'] = np.cos(2 * np.pi * df['hour'] / 24)
+        df['month_sin'] = np.sin(2 * np.pi * df['month'] / 12)
+        df['month_cos'] = np.cos(2 * np.pi * df['month'] / 12)
+
+        # Resample to 1-hour intervals
+        df = df.set_index('datetime').resample('1h').mean(numeric_only=True).interpolate()
         df = df.reset_index()
         
         print(f"✓ Loaded {len(df)} records")
@@ -119,10 +170,10 @@ class WeatherLSTMPredictor:
         X_list = []
         y_list = []
         
-        lookback_samples = self.lookback_hours * 60
-        forecast_samples = self.forecast_horizon * 60
+        lookback_samples = self.lookback_hours
+        forecast_samples = self.forecast_horizon
         
-        for i in range(lookback_samples, len(df) - forecast_samples, 60):  # Step by hour
+        for i in range(lookback_samples, len(df) - forecast_samples, 1):  # Step by hour
             # Input sequence (past data)
             X_seq = df.iloc[i - lookback_samples:i][feature_cols].values
             X_list.append(X_seq)
@@ -188,7 +239,7 @@ class WeatherLSTMPredictor:
         criterion = nn.MSELoss()
         optimizer = torch.optim.Adam(self.model.parameters(), lr=learning_rate)
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode='min', factor=0.5, patience=5, verbose=True
+            optimizer, mode='min', factor=0.5, patience=5
         )
         
         # Training loop
@@ -312,7 +363,16 @@ class WeatherLSTMPredictor:
         print(f"\n✓ Model saved to {output_dir}/")
 
 def main():
-    csv_path = 'data/weather_data_latest.csv'
+    csv_path = os.getenv('TRAINING_CSV', 'data/moratuwa_open_meteo.csv')
+    if not os.path.exists(csv_path):
+        fallback = 'moratuwa_sensors_20k_dataset.csv'
+        if os.path.exists(fallback):
+            csv_path = fallback
+        else:
+            raise FileNotFoundError(
+                f'Training dataset not found: {csv_path}. '
+                'Run: python fetch_moratuwa_data.py --start 2026-04-01'
+            )
     
     predictor = WeatherLSTMPredictor(
         lookback_hours=24,
@@ -321,7 +381,7 @@ def main():
     
     train_losses, test_losses = predictor.train(
         csv_path,
-        epochs=100,
+        epochs=int(os.getenv('TRAINING_EPOCHS', '100')),
         batch_size=32,
         learning_rate=0.001
     )

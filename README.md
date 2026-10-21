@@ -1,3 +1,13 @@
+---
+title: Weather Backend
+emoji: 🌤️
+colorFrom: blue
+colorTo: green
+sdk: gradio
+sdk_version: "4.44.0"
+app_file: app.py
+pinned: false
+---
 # Weather Prediction Model Backend
 
 This repository contains the backend model and prediction pipeline for the weather and air quality forecasting system.
