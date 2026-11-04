@@ -353,7 +353,6 @@ def home():
         'endpoints': {
             '/predict': 'POST - Single-step weather prediction from supplied data',
             '/forecast/24h': 'GET - ML-powered 24-hour hourly forecast (LSTM + Open-Meteo seed)',
-            '/forecast/7day': 'GET - Open-Meteo 7-day forecast (Moratuwa)',
             '/health': 'GET - Check API health',
             '/model-info': 'GET - Get model information'
         }
@@ -415,15 +414,6 @@ def forecast_24h():
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 502
 
-
-@app.route('/forecast/7day', methods=['GET'])
-def forecast_7day():
-    """Live 7-day forecast from Open-Meteo for University of Moratuwa (no ML model required)."""
-    try:
-        forecast = open_meteo_client.fetch_7day_forecast()
-        return jsonify({'success': True, 'forecast': forecast})
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 502
 
 @app.route('/sensor-data/fallback', methods=['GET'])
 def sensor_data_fallback():

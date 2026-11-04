@@ -29,12 +29,3 @@ AIR_QUALITY_HOURLY_VARS = [
     'us_aqi',
     'european_aqi',
 ]
-
-DAILY_FORECAST_VARS = [
-    'weather_code',
-    'temperature_2m_max',
-    'temperature_2m_min',
-    'precipitation_sum',
-    'wind_speed_10m_max',
-    'uv_index_max',
-]

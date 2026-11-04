@@ -46,9 +46,25 @@ copy .env.example .env
 python train_lstm_model.py
 ```
 
-5. Run the prediction API:
+5. Run the prediction API on the port used by the frontend:
 
 ```bash
+python app.py
+```
+
+The API is available at `http://localhost:8000` and provides a 24-hour hourly
+forecast at `GET http://localhost:8000/forecast/24h`.
+
+For a direct Flask run, use the same port explicitly:
+
+```bash
+API_PORT=8000 python prediction_api.py
+```
+
+On Windows PowerShell:
+
+```powershell
+$env:API_PORT = "8000"
 python prediction_api.py
 ```
 
